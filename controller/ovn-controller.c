@@ -3631,6 +3631,318 @@ en_bfd_chassis_cleanup(void *data OVS_UNUSED){
     sset_destroy(&bfd_chassis->bfd_chassis);
 }
 
+static void *
+en_nat_addresses_init(struct engine_node *node OVS_UNUSED,
+                   struct engine_arg *arg OVS_UNUSED)
+{
+    struct ed_type_nat_addresses *data = xzalloc(sizeof *data);
+    shash_init(&data->nat_addresses);
+    sset_init(&data->localnet_vifs);
+    sset_init(&data->local_l3gw_ports);
+    sset_init(&data->nat_ip_keys);
+    return data;
+}
+
+/* Extracts the mac, IPv4 and IPv6 addresses, and logical port from
+ * 'addresses' which should be of the format 'MAC [IP1 IP2 ..]
+ * [is_chassis_resident("LPORT_NAME")]', where IPn should be a valid IPv4
+ * or IPv6 address, and stores them in the 'ipv4_addrs' and 'ipv6_addrs'
+ * fields of 'laddrs'.  The logical port name is stored in 'lport'.
+ *
+ * Returns true if at least 'MAC' is found in 'address', false otherwise.
+ *
+ * The caller must call destroy_lport_addresses() and free(*lport). */
+static bool
+extract_addresses_with_port(const char *addresses,
+                            struct lport_addresses *laddrs,
+                            char **lport)
+{
+    int ofs;
+    if (!extract_addresses(addresses, laddrs, &ofs)) {
+        return false;
+    } else if (!addresses[ofs]) {
+        return true;
+    }
+
+    struct lexer lexer;
+    lexer_init(&lexer, addresses + ofs);
+    lexer_get(&lexer);
+
+    if (lexer.error || lexer.token.type != LEX_T_ID
+        || !lexer_match_id(&lexer, "is_chassis_resident")) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "invalid syntax '%s' in address", addresses);
+        lexer_destroy(&lexer);
+        return true;
+    }
+
+    if (!lexer_match(&lexer, LEX_T_LPAREN)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "Syntax error: expecting '(' after "
+                          "'is_chassis_resident' in address '%s'", addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    if (lexer.token.type != LEX_T_STRING) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl,
+                    "Syntax error: expecting quoted string after "
+                    "'is_chassis_resident' in address '%s'", addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    *lport = xstrdup(lexer.token.s);
+
+    lexer_get(&lexer);
+    if (!lexer_match(&lexer, LEX_T_RPAREN)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_INFO_RL(&rl, "Syntax error: expecting ')' after quoted string in "
+                          "'is_chassis_resident()' in address '%s'",
+                          addresses);
+        lexer_destroy(&lexer);
+        return false;
+    }
+
+    lexer_destroy(&lexer);
+    return true;
+}
+
+static void
+consider_nat_address(struct ovsdb_idl_index *sbrec_port_binding_by_name,
+                     const char *nat_address,
+                     const struct sbrec_port_binding *pb,
+                     struct sset *nat_address_keys,
+                     const struct sbrec_chassis *chassis,
+                     const struct sset *active_tunnels,
+                     struct shash *nat_addresses)
+{
+    struct lport_addresses *laddrs = xmalloc(sizeof *laddrs);
+    char *lport = NULL;
+    if (!extract_addresses_with_port(nat_address, laddrs, &lport)
+        || (!lport && !strcmp(pb->type, "patch"))
+        || (lport && !lport_is_chassis_resident(
+                sbrec_port_binding_by_name, chassis,
+                active_tunnels, lport))) {
+        destroy_lport_addresses(laddrs);
+        free(laddrs);
+        free(lport);
+        return;
+    }
+    free(lport);
+
+    int i;
+    for (i = 0; i < laddrs->n_ipv4_addrs; i++) {
+        char *name = xasprintf("%s-%s", pb->logical_port,
+                                        laddrs->ipv4_addrs[i].addr_s);
+        sset_add(nat_address_keys, name);
+        free(name);
+    }
+    if (laddrs->n_ipv4_addrs == 0) {
+        char *name = xasprintf("%s-noip", pb->logical_port);
+        sset_add(nat_address_keys, name);
+        free(name);
+    }
+    shash_add(nat_addresses, pb->logical_port, laddrs);
+}
+
+static void
+get_nat_addresses_and_keys(struct ovsdb_idl_index *sbrec_port_binding_by_name,
+                           struct sset *nat_address_keys,
+                           struct sset *local_l3gw_ports,
+                           const struct sbrec_chassis *chassis,
+                           const struct sset *active_tunnels,
+                           struct shash *nat_addresses)
+{
+    const char *gw_port;
+    SSET_FOR_EACH(gw_port, local_l3gw_ports) {
+        const struct sbrec_port_binding *pb;
+
+        pb = lport_lookup_by_name(sbrec_port_binding_by_name, gw_port);
+        if (!pb) {
+            continue;
+        }
+
+        if (pb->n_nat_addresses) {
+            for (int i = 0; i < pb->n_nat_addresses; i++) {
+                consider_nat_address(sbrec_port_binding_by_name,
+                                     pb->nat_addresses[i], pb,
+                                     nat_address_keys, chassis,
+                                     active_tunnels,
+                                     nat_addresses);
+            }
+        } else {
+            /* Continue to support options:nat-addresses for version
+             * upgrade. */
+            const char *nat_addresses_options = smap_get(&pb->options,
+                                                         "nat-addresses");
+            if (nat_addresses_options) {
+                consider_nat_address(sbrec_port_binding_by_name,
+                                     nat_addresses_options, pb,
+                                     nat_address_keys, chassis,
+                                     active_tunnels,
+                                     nat_addresses);
+            }
+        }
+    }
+}
+
+/* Get localnet vifs, local l3gw ports and ofport for localnet patch ports. */
+static void
+get_localnet_vifs_l3gwports(
+    struct ovsdb_idl_index *sbrec_port_binding_by_datapath,
+    struct ovsdb_idl_index *sbrec_port_binding_by_name,
+    const struct ovsrec_bridge *br_int,
+    const struct sbrec_chassis *chassis,
+    const struct hmap *local_datapaths,
+    struct sset *localnet_vifs,
+    struct sset *local_l3gw_ports)
+{
+    for (int i = 0; i < br_int->n_ports; i++) {
+        const struct ovsrec_port *port_rec = br_int->ports[i];
+        if (!strcmp(port_rec->name, br_int->name)) {
+            continue;
+        }
+        const char *tunnel_id = smap_get(&port_rec->external_ids,
+                                          "ovn-chassis-id");
+        if (tunnel_id &&
+                encaps_tunnel_id_match(tunnel_id, chassis->name, NULL, NULL)) {
+            continue;
+        }
+        const char *localnet = smap_get(&port_rec->external_ids,
+                                        "ovn-localnet-port");
+        if (localnet) {
+            continue;
+        }
+        for (int j = 0; j < port_rec->n_interfaces; j++) {
+            const struct ovsrec_interface *iface_rec = port_rec->interfaces[j];
+            if (!iface_rec->n_ofport) {
+                continue;
+            }
+            /* Get localnet vif. */
+            const char *iface_id = smap_get(&iface_rec->external_ids,
+                                            "iface-id");
+            if (!iface_id) {
+                continue;
+            }
+            const struct sbrec_port_binding *pb
+                = lport_lookup_by_name(sbrec_port_binding_by_name, iface_id);
+            if (!pb || pb->chassis != chassis) {
+                continue;
+            }
+            if (!iface_rec->link_state ||
+                    strcmp(iface_rec->link_state, "up")) {
+                continue;
+            }
+            struct local_datapath *ld
+                = get_local_datapath(local_datapaths,
+                                     pb->datapath->tunnel_key);
+            if (ld && ld->localnet_port) {
+                sset_add(localnet_vifs, iface_id);
+            }
+        }
+    }
+
+    struct sbrec_port_binding *target = sbrec_port_binding_index_init_row(
+        sbrec_port_binding_by_datapath);
+
+    const struct local_datapath *ld;
+    HMAP_FOR_EACH (ld, hmap_node, local_datapaths) {
+        const struct sbrec_port_binding *pb;
+
+        if (!ld->localnet_port) {
+            continue;
+        }
+
+        /* Get l3gw ports.  Consider port bindings with type "l3gateway"
+         * that connect to gateway routers (if local), and consider port
+         * bindings of type "patch" since they might connect to
+         * distributed gateway ports with NAT addresses. */
+
+        sbrec_port_binding_index_set_datapath(target, ld->datapath);
+        SBREC_PORT_BINDING_FOR_EACH_EQUAL (pb, target,
+                                           sbrec_port_binding_by_datapath) {
+            if ((!strcmp(pb->type, "l3gateway") && pb->chassis == chassis)
+                || !strcmp(pb->type, "patch")) {
+                sset_add(local_l3gw_ports, pb->logical_port);
+            }
+        }
+    }
+    sbrec_port_binding_index_destroy_row(target);
+}
+
+static void
+en_nat_addresses_run(struct engine_node *node, void *data OVS_UNUSED)
+{
+    struct ed_type_nat_addresses *nat_addresses = data;
+    const struct ovsrec_open_vswitch_table *ovs_table =
+        EN_OVSDB_GET(engine_get_input("OVS_open_vswitch", node));
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    struct ovsdb_idl_index *sbrec_chassis_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("SB_chassis", node),
+            "name");
+    const struct sbrec_chassis *chassis
+        = chassis_lookup_by_name(sbrec_chassis_by_name, chassis_id);
+
+    struct ovsdb_idl_index *sbrec_pb_by_datapath =
+            engine_ovsdb_node_get_index(
+                    engine_get_input("SB_port_binding", node),
+                    "datapath");
+    struct ovsdb_idl_index *sbrec_pb_by_name =
+            engine_ovsdb_node_get_index(
+                    engine_get_input("SB_port_binding", node),
+                    "name");
+    const struct ovsrec_bridge_table *bridge_table =
+        EN_OVSDB_GET(engine_get_input("OVS_bridge", node));
+    const struct ovsrec_bridge *br_int = get_br_int(bridge_table, ovs_table);
+
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+    const struct hmap *local_datapaths = &rt_data->local_datapaths;
+    const struct sset *active_tunnels = &rt_data->active_tunnels;
+
+    struct shash_node *nat_node;
+    SHASH_FOR_EACH(nat_node, &nat_addresses->nat_addresses) {
+        struct lport_addresses *laddrs = nat_node->data;
+        destroy_lport_addresses(laddrs);
+        free(laddrs);
+    }
+    shash_clear(&nat_addresses->nat_addresses);
+    sset_clear(&nat_addresses->localnet_vifs);
+    sset_clear(&nat_addresses->local_l3gw_ports);
+    sset_clear(&nat_addresses->nat_ip_keys);
+
+    get_localnet_vifs_l3gwports(sbrec_pb_by_datapath,
+                                sbrec_pb_by_name,
+                                br_int, chassis, local_datapaths,
+                                &nat_addresses->localnet_vifs, &nat_addresses->local_l3gw_ports);
+
+    get_nat_addresses_and_keys(sbrec_pb_by_name,
+                               &nat_addresses->nat_ip_keys, &nat_addresses->local_l3gw_ports,
+                               chassis, active_tunnels,
+                               &nat_addresses->nat_addresses);
+
+    engine_set_node_state(node, EN_UPDATED);
+}
+
+static bool
+nat_addresses_change_handler(struct engine_node *node, void *data)
+{
+    en_nat_addresses_run(node, data);
+    return true;
+}
+
+static void
+en_nat_addresses_cleanup(void *data OVS_UNUSED){
+    struct ed_type_nat_addresses *nat_addresses = data;
+    shash_destroy(&nat_addresses->nat_addresses);
+    sset_destroy(&nat_addresses->localnet_vifs);
+    sset_destroy(&nat_addresses->local_l3gw_ports);
+    sset_destroy(&nat_addresses->nat_ip_keys);
+}
+
 /* Engine node which is used to handle the Non VIF data like
  *   - OVS patch ports
  *   - Tunnel ports and the related chassis information.
@@ -5044,6 +5356,13 @@ controller_output_bfd_chassis_handler(struct engine_node *node,
     return true;
 }
 
+static bool
+controller_output_nat_addresses_handler(struct engine_node *node,
+                                        void *data OVS_UNUSED)
+{
+    engine_set_node_state(node, EN_UPDATED);
+    return true;
+}
 
 /* Handles sbrec_chassis changes.
  * If a new chassis is added or removed return false, so that
@@ -5322,6 +5641,7 @@ main(int argc, char *argv[])
     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lb_data, "lb_data");
     ENGINE_NODE(mac_cache, "mac_cache");
     ENGINE_NODE(bfd_chassis, "bfd_chassis");
+    ENGINE_NODE(nat_addresses, "nat_addresses");
 
 #define SB_NODE(NAME, NAME_STR) ENGINE_NODE_SB(NAME, NAME_STR);
     SB_NODES
@@ -5365,6 +5685,12 @@ main(int argc, char *argv[])
     engine_add_input(&en_bfd_chassis, &en_sb_sb_global, NULL);
     engine_add_input(&en_bfd_chassis, &en_sb_chassis, NULL);
     engine_add_input(&en_bfd_chassis, &en_sb_ha_chassis_group, NULL);
+
+    engine_add_input(&en_nat_addresses, &en_ovs_open_vswitch, NULL);
+    engine_add_input(&en_nat_addresses, &en_ovs_bridge, NULL);
+    engine_add_input(&en_nat_addresses, &en_sb_chassis, NULL);
+    engine_add_input(&en_nat_addresses, &en_sb_port_binding, nat_addresses_change_handler);
+    engine_add_input(&en_nat_addresses, &en_runtime_data, nat_addresses_change_handler);
 
     /* Note: The order of inputs is important, all OVS interface changes must
      * be handled before any ct_zone changes.
@@ -5523,6 +5849,8 @@ main(int argc, char *argv[])
                      controller_output_mac_cache_handler);
     engine_add_input(&en_controller_output, &en_bfd_chassis,
                      controller_output_bfd_chassis_handler);
+    engine_add_input(&en_controller_output, &en_nat_addresses,
+                     controller_output_nat_addresses_handler);
 
     struct engine_arg engine_arg = {
         .sb_idl = ovnsb_idl_loop.idl,
@@ -5567,6 +5895,8 @@ main(int argc, char *argv[])
         engine_get_internal_data(&en_ct_zones);
     struct ed_type_bfd_chassis *bfd_chassis_data =
         engine_get_internal_data(&en_bfd_chassis);
+    struct ed_type_nat_addresses *nat_addresses_data =
+        engine_get_internal_data(&en_nat_addresses);
     struct ed_type_runtime_data *runtime_data =
         engine_get_internal_data(&en_runtime_data);
     struct ed_type_template_vars *template_vars_data =
@@ -5888,6 +6218,7 @@ main(int argc, char *argv[])
                     }
 
                     runtime_data = engine_get_data(&en_runtime_data);
+                    nat_addresses_data = engine_get_data(&en_nat_addresses);
                     if (runtime_data) {
                         stopwatch_start(PATCH_RUN_STOPWATCH_NAME, time_msec());
                         patch_run(ovs_idl_txn,
@@ -5933,7 +6264,6 @@ main(int argc, char *argv[])
                         pinctrl_update(ovnsb_idl_loop.idl, br_int->name);
                         pinctrl_run(ovnsb_idl_txn,
                                     sbrec_datapath_binding_by_key,
-                                    sbrec_port_binding_by_datapath,
                                     sbrec_port_binding_by_key,
                                     sbrec_port_binding_by_name,
                                     sbrec_mac_binding_by_lport_ip,
@@ -5948,13 +6278,14 @@ main(int argc, char *argv[])
                                     sbrec_mac_binding_table_get(
                                         ovnsb_idl_loop.idl),
                                     sbrec_bfd_table_get(ovnsb_idl_loop.idl),
-                                    br_int, chassis,
+                                    chassis,
                                     &runtime_data->local_datapaths,
                                     &runtime_data->active_tunnels,
                                     &runtime_data->local_active_ports_ipv6_pd,
                                     &runtime_data->local_active_ports_ras,
                                     ovsrec_open_vswitch_table_get(
-                                            ovs_idl_loop.idl));
+                                            ovs_idl_loop.idl),
+                                    nat_addresses_data);
                         stopwatch_stop(PINCTRL_RUN_STOPWATCH_NAME,
                                        time_msec());
                         mirror_run(ovs_idl_txn,
