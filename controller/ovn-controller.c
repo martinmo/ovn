@@ -83,7 +83,7 @@
 #include "lib/ovn-l7.h"
 #include "hmapx.h"
 #include "mirror.h"
-#include "mac_cache.h"
+#include "nat-addresses.h"
 #include "statctrl.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
@@ -3631,6 +3631,125 @@ en_bfd_chassis_cleanup(void *data OVS_UNUSED){
     sset_destroy(&bfd_chassis->bfd_chassis);
 }
 
+static void *
+en_nat_addresses_init(struct engine_node *node OVS_UNUSED,
+                   struct engine_arg *arg OVS_UNUSED)
+{
+    struct ed_type_nat_addresses *data = xmalloc(sizeof *data);
+    shash_init(&data->nat_addresses);
+    sset_init(&data->localnet_vifs);
+    sset_init(&data->local_l3gw_ports);
+    sset_init(&data->nat_ip_keys);
+    return data;
+}
+
+static void
+en_nat_addresses_run(struct engine_node *node, void *data OVS_UNUSED)
+{
+    struct ed_type_nat_addresses *nat_addresses = data;
+    const struct ovsrec_open_vswitch_table *ovs_table =
+        EN_OVSDB_GET(engine_get_input("OVS_open_vswitch", node));
+    const char *chassis_id = get_ovs_chassis_id(ovs_table);
+    struct ovsdb_idl_index *sbrec_chassis_by_name =
+        engine_ovsdb_node_get_index(
+            engine_get_input("SB_chassis", node),
+            "name");
+    const struct sbrec_chassis *chassis
+        = chassis_lookup_by_name(sbrec_chassis_by_name, chassis_id);
+
+    struct ovsdb_idl_index *sbrec_pb_by_datapath =
+            engine_ovsdb_node_get_index(
+                    engine_get_input("SB_port_binding", node),
+                    "datapath");
+    struct ovsdb_idl_index *sbrec_pb_by_name =
+            engine_ovsdb_node_get_index(
+                    engine_get_input("SB_port_binding", node),
+                    "name");
+    const struct ovsrec_bridge_table *bridge_table =
+        EN_OVSDB_GET(engine_get_input("OVS_bridge", node));
+    const struct ovsrec_bridge *br_int = get_br_int(bridge_table, ovs_table);
+
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+    const struct hmap *local_datapaths = &rt_data->local_datapaths;
+    const struct sset *active_tunnels = &rt_data->active_tunnels;
+
+    struct shash_node *nat_node;
+    SHASH_FOR_EACH (nat_node, &nat_addresses->nat_addresses) {
+        struct lport_addresses *laddrs = nat_node->data;
+        destroy_lport_addresses(laddrs);
+        free(laddrs);
+    }
+    shash_clear(&nat_addresses->nat_addresses);
+    sset_clear(&nat_addresses->localnet_vifs);
+    sset_clear(&nat_addresses->local_l3gw_ports);
+    sset_clear(&nat_addresses->nat_ip_keys);
+
+    get_localnet_vifs_l3gwports(sbrec_pb_by_datapath,
+                                sbrec_pb_by_name,
+                                br_int, chassis, local_datapaths,
+                                &nat_addresses->localnet_vifs,
+                                &nat_addresses->local_l3gw_ports);
+
+    get_nat_addresses_and_keys(sbrec_pb_by_name,
+                               &nat_addresses->nat_ip_keys,
+                               &nat_addresses->local_l3gw_ports,
+                               chassis, active_tunnels,
+                               &nat_addresses->nat_addresses);
+
+    engine_set_node_state(node, EN_UPDATED);
+}
+
+static bool
+nat_addresses_runtime_data_handler(struct engine_node *node,
+                                   void *data OVS_UNUSED)
+{
+    struct ed_type_runtime_data *rt_data =
+        engine_get_input_data("runtime_data", node);
+
+    /* There is no tracked data. Fall back to full recompute */
+    if (!rt_data->tracked) {
+        return false;
+    }
+
+    /* if there is no change in datapathbindings we can skip the recompute */
+    struct hmap *tracked_dp_bindings = &rt_data->tracked_dp_bindings;
+    if (hmap_is_empty(tracked_dp_bindings)) {
+        engine_set_node_state(node, EN_UPDATED);
+        return true;
+    }
+    /* If there is a change in tracked datapath binding, perform a full
+     * recomnpute. We need to call run directly from the change handler.
+     * Otherwise the engine run gets cancelled if there is a change in runtime
+     * data (e.g. BFD failover) and the southbound is unaccessible */
+    en_nat_addresses_run(node, data);
+    return true;
+}
+
+static void free_lport_addresses(struct lport_addresses *laddrs)
+{
+    free(laddrs->ipv6_addrs);
+    free(laddrs->ipv4_addrs);
+}
+
+static void
+en_nat_addresses_cleanup(void *data OVS_UNUSED){
+    struct ed_type_nat_addresses *nat_addresses = data;
+    struct shash_node *node, *next;
+
+    SHASH_FOR_EACH_SAFE (node, next, &nat_addresses->nat_addresses) {
+        struct lport_addresses *laddrs = node->data;
+        free_lport_addresses(laddrs);
+        free(laddrs);
+        shash_delete(&nat_addresses->nat_addresses, node);
+    }
+
+    shash_destroy(&nat_addresses->nat_addresses);
+    sset_destroy(&nat_addresses->localnet_vifs);
+    sset_destroy(&nat_addresses->local_l3gw_ports);
+    sset_destroy(&nat_addresses->nat_ip_keys);
+}
+
 /* Engine node which is used to handle the Non VIF data like
  *   - OVS patch ports
  *   - Tunnel ports and the related chassis information.
@@ -5044,6 +5163,13 @@ controller_output_bfd_chassis_handler(struct engine_node *node,
     return true;
 }
 
+static bool
+controller_output_nat_addresses_handler(struct engine_node *node,
+                                        void *data OVS_UNUSED)
+{
+    engine_set_node_state(node, EN_UPDATED);
+    return true;
+}
 
 /* Handles sbrec_chassis changes.
  * If a new chassis is added or removed return false, so that
@@ -5322,6 +5448,7 @@ main(int argc, char *argv[])
     ENGINE_NODE_WITH_CLEAR_TRACK_DATA(lb_data, "lb_data");
     ENGINE_NODE(mac_cache, "mac_cache");
     ENGINE_NODE(bfd_chassis, "bfd_chassis");
+    ENGINE_NODE(nat_addresses, "nat_addresses");
 
 #define SB_NODE(NAME, NAME_STR) ENGINE_NODE_SB(NAME, NAME_STR);
     SB_NODES
@@ -5365,6 +5492,13 @@ main(int argc, char *argv[])
     engine_add_input(&en_bfd_chassis, &en_sb_sb_global, NULL);
     engine_add_input(&en_bfd_chassis, &en_sb_chassis, NULL);
     engine_add_input(&en_bfd_chassis, &en_sb_ha_chassis_group, NULL);
+
+    engine_add_input(&en_nat_addresses, &en_ovs_open_vswitch, NULL);
+    engine_add_input(&en_nat_addresses, &en_ovs_bridge, NULL);
+    engine_add_input(&en_nat_addresses, &en_sb_chassis, NULL);
+    engine_add_input(&en_nat_addresses, &en_sb_port_binding, NULL);
+    engine_add_input(&en_nat_addresses, &en_runtime_data,
+                     nat_addresses_runtime_data_handler);
 
     /* Note: The order of inputs is important, all OVS interface changes must
      * be handled before any ct_zone changes.
@@ -5523,6 +5657,8 @@ main(int argc, char *argv[])
                      controller_output_mac_cache_handler);
     engine_add_input(&en_controller_output, &en_bfd_chassis,
                      controller_output_bfd_chassis_handler);
+    engine_add_input(&en_controller_output, &en_nat_addresses,
+                     controller_output_nat_addresses_handler);
 
     struct engine_arg engine_arg = {
         .sb_idl = ovnsb_idl_loop.idl,
@@ -5567,6 +5703,8 @@ main(int argc, char *argv[])
         engine_get_internal_data(&en_ct_zones);
     struct ed_type_bfd_chassis *bfd_chassis_data =
         engine_get_internal_data(&en_bfd_chassis);
+    struct ed_type_nat_addresses *nat_addresses_data =
+        engine_get_internal_data(&en_nat_addresses);
     struct ed_type_runtime_data *runtime_data =
         engine_get_internal_data(&en_runtime_data);
     struct ed_type_template_vars *template_vars_data =
@@ -5889,6 +6027,7 @@ main(int argc, char *argv[])
                     }
 
                     runtime_data = engine_get_data(&en_runtime_data);
+                    nat_addresses_data = engine_get_data(&en_nat_addresses);
                     if (runtime_data) {
                         stopwatch_start(PATCH_RUN_STOPWATCH_NAME, time_msec());
                         patch_run(ovs_idl_txn,
@@ -5934,7 +6073,6 @@ main(int argc, char *argv[])
                         pinctrl_update(ovnsb_idl_loop.idl, br_int->name);
                         pinctrl_run(ovnsb_idl_txn,
                                     sbrec_datapath_binding_by_key,
-                                    sbrec_port_binding_by_datapath,
                                     sbrec_port_binding_by_key,
                                     sbrec_port_binding_by_name,
                                     sbrec_mac_binding_by_lport_ip,
@@ -5949,13 +6087,14 @@ main(int argc, char *argv[])
                                     sbrec_mac_binding_table_get(
                                         ovnsb_idl_loop.idl),
                                     sbrec_bfd_table_get(ovnsb_idl_loop.idl),
-                                    br_int, chassis,
+                                    chassis,
                                     &runtime_data->local_datapaths,
                                     &runtime_data->active_tunnels,
                                     &runtime_data->local_active_ports_ipv6_pd,
                                     &runtime_data->local_active_ports_ras,
                                     ovsrec_open_vswitch_table_get(
-                                            ovs_idl_loop.idl));
+                                            ovs_idl_loop.idl),
+                                    nat_addresses_data);
                         stopwatch_stop(PINCTRL_RUN_STOPWATCH_NAME,
                                        time_msec());
                         mirror_run(ovs_idl_txn,
