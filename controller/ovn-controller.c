@@ -6039,7 +6039,7 @@ main(int argc, char *argv[])
         update_ssl_config(ovsrec_ssl_table_get(ovs_idl_loop.idl));
 
         struct ovsdb_idl_txn *ovnsb_idl_txn
-            = ovsdb_idl_loop_run(&ovnsb_idl_loop);
+            = ovsdb_idl_loop_run_completion(&ovnsb_idl_loop, 500, NULL);
         unsigned int new_ovnsb_cond_seqno
             = ovsdb_idl_get_condition_seqno(ovnsb_idl_loop.idl);
         if (new_ovnsb_cond_seqno != ovnsb_cond_seqno) {
