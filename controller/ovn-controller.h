@@ -20,6 +20,8 @@
 #include "simap.h"
 #include "lib/ovn-sb-idl.h"
 
+#define IDL_LOOP_MAX_DURATION_MS 500
+
 struct ovsrec_bridge_table;
 
 /* Linux supports a maximum of 64K zones, which seems like a fine default. */
