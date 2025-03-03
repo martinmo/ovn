@@ -5868,7 +5868,7 @@ nbctl_lrp_set_gateway_chassis(struct ctl_context *ctx)
         }
     }
 
-    gc_name = xasprintf("%s-%s", lrp_name, chassis_name);
+    gc_name = xasprintf("%s_%s", lrp_name, chassis_name);
     const struct nbrec_gateway_chassis *gc;
     error = gc_by_name_or_uuid(ctx, gc_name, false, &gc);
     if (error) {
