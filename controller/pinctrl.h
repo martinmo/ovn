@@ -20,7 +20,6 @@
 #include <stdint.h>
 
 #include "lib/sset.h"
-#include "openvswitch/shash.h"
 #include "openvswitch/list.h"
 #include "openvswitch/meta-flow.h"
 
@@ -40,16 +39,10 @@ struct sbrec_bfd_table;
 struct sbrec_port_binding;
 struct sbrec_mac_binding_table;
 
-struct ed_type_nat_addresses {
-    struct shash nat_addresses;
-    struct sset localnet_vifs;
-    struct sset local_l3gw_ports;
-    struct sset nat_ip_keys;
-};
-
 void pinctrl_init(void);
 void pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
                  struct ovsdb_idl_index *sbrec_datapath_binding_by_key,
+                 struct ovsdb_idl_index *sbrec_port_binding_by_datapath,
                  struct ovsdb_idl_index *sbrec_port_binding_by_key,
                  struct ovsdb_idl_index *sbrec_port_binding_by_name,
                  struct ovsdb_idl_index *sbrec_mac_binding_by_lport_ip,
@@ -61,13 +54,12 @@ void pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
                  const struct sbrec_service_monitor_table *,
                  const struct sbrec_mac_binding_table *,
                  const struct sbrec_bfd_table *,
-                 const struct sbrec_chassis *,
+                 const struct ovsrec_bridge *, const struct sbrec_chassis *,
                  const struct hmap *local_datapaths,
                  const struct sset *active_tunnels,
                  const struct shash *local_active_ports_ipv6_pd,
                  const struct shash *local_active_ports_ras,
-                 const struct ovsrec_open_vswitch_table *ovs_table,
-                 struct ed_type_nat_addresses *nat_addresses);
+                 const struct ovsrec_open_vswitch_table *ovs_table);
 void pinctrl_wait(struct ovsdb_idl_txn *ovnsb_idl_txn);
 void pinctrl_destroy(void);
 void pinctrl_set_br_int_name(const char *br_int_name);
