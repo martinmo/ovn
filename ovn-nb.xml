@@ -3151,6 +3151,16 @@ or
         </p>
       </column>
 
+      <column name="options" key="fallback_to_routing_policy"
+          type='{"type": "boolean"}'>
+        <p>
+          If set to <code>true</code>, the routing behavior of the logical
+          router will be changed to always evaluate routing policies instead
+          of dropping the packet, even if there was no routing rule match in
+          the routing table.  Defaults to <code>false</code>.
+        </p>
+      </column>
+
       <column name="options" key="ct-commit-all" type='{"type": "boolean"}'>
         When enabled the LR will commit traffic in a zone that is stateful.
         The traffic is not commited to both zones but it is selective based

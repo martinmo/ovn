@@ -275,7 +275,7 @@ BUILD_ASSERT_DECL(ACL_OBS_STAGE_MAX < (1 << 2));
  * |     |                           |   |                 | E |  NEXT_HOP_IPV6 (>= IN_IP_ROUTING)  |
  * +-----+---------------------------+---+-----------------+ G |                                    |
  * | R2  |  REG_DHCP_RELAY_DIP_IPV4  |   |                 | 0 |                                    |
- * |     |       REG_LB_PORT         | X |                 | 0 |                                    |
+ * |     |       REG_LB_PORT         | X |                 |   |                                    |
  * |     | (>= IN_LB_AFF_CHECK       | R |                 |   |                                    |
  * |     |  <= IN_LB_AFF_LEARN)      | E |                 |   |                                    |
  * +-----+---------------------------+ G |     UNUSED      |   |                                    |
@@ -283,11 +283,11 @@ BUILD_ASSERT_DECL(ACL_OBS_STAGE_MAX < (1 << 2));
  * |     |                           |   |                 |   |                                    |
  * +-----+---------------------------+---+-----------------+---+------------------------------------+
  * | R4  |        REG_LB_IPV4        | X |                 |   |                                    |
- * |     |  (>= IN_LB_AFF_CHECK &&   | R |                 |   |                                    |
- * |     |   <= IN_LB_AFF_LEARN)     | R |                 |   |                                    |
- * +-----+---------------------------+ E |     UNUSED      | X |                                    |
- * | R5  |  SRC_IPV4 for ARP-REQ     | G |                 | X |            REG_LB_IPV6             |
- * |     |      (>= IP_INPUT)        | 2 |                 | R |        (>= IN_LB_AFF_CHECK &&      |
+ * |     |  (>= IN_LB_AFF_CHECK &&   | R |                 |   |            REG_SRC_IPV6            |
+ * |     |   <= IN_LB_AFF_LEARN)     | E |                 |   |        (>= IN_IP_ROUTING &&        |
+ * +-----+---------------------------+ G |     UNUSED      | X |         <= IN_POLICY_ECMP) /       |
+ * | R5  |  SRC_IPV4 for ARP-REQ     | 2 |                 | X |            REG_LB_IPV6             |
+ * |     |      (>= IP_INPUT)        |   |                 | R |        (>= IN_LB_AFF_CHECK &&      |
  * +-----+---------------------------+---+-----------------+ E |         <= IN_LB_AFF_LEARN)        |
  * | R6  |        UNUSED             | X |                 | G |                                    |
  * |     |                           | R |                 | 1 |                                    |
@@ -1430,6 +1430,12 @@ static bool
 lsp_disable_arp_nd_rsp(const struct nbrec_logical_switch_port *nbsp)
 {
     return smap_get_bool(&nbsp->options, "disable_arp_nd_rsp", false);
+}
+
+static bool
+lr_fallback_to_routing_policy(const struct nbrec_logical_router *nbr)
+{
+    return smap_get_bool(&nbr->options, "fallback_to_routing_policy", false);
 }
 
 static bool
@@ -13719,8 +13725,24 @@ build_default_route_flows_for_lrouter(
 {
     ovn_lflow_add_default_drop(lflows, od, S_ROUTER_IN_IP_ROUTING_ECMP,
                                NULL);
-    ovn_lflow_add_default_drop(lflows, od, S_ROUTER_IN_IP_ROUTING,
-                               NULL);
+    if (lr_fallback_to_routing_policy(od->nbr)) {
+        /* If we have no match in the routing table, delay the decision to drop
+         * the packet until we reach the policy table.
+         * We zero the IPv6 src ip and nexthop registers and later use them in
+         * the lr_in_policy pipeline for the decision whether to proceed or drop
+         * the packet.
+         */
+        ovn_lflow_add(lflows, od, S_ROUTER_IN_IP_ROUTING, 0, "1",
+                      "ip.ttl--; flags.loopback = 1; "
+                      REG_ECMP_GROUP_ID" = 0; "
+                      REG_NEXT_HOP_IPV6" = 0; "
+                      REG_SRC_IPV6" = 0; "
+                      "next;",
+                      NULL);
+    } else {
+        ovn_lflow_add_default_drop(lflows, od, S_ROUTER_IN_IP_ROUTING,
+                                   NULL);
+    }
     ovn_lflow_add(lflows, od, S_ROUTER_IN_IP_ROUTING_ECMP, 150,
                   REG_ECMP_GROUP_ID" == 0", "next;",
                   NULL);
@@ -14096,6 +14118,19 @@ build_ingress_policy_flows_for_lrouter(
         struct lflow_ref *lflow_ref)
 {
     ovs_assert(od->nbr);
+    if (lr_fallback_to_routing_policy(od->nbr)) {
+        /* Drop the packet if there was neither a matching rule in the routing
+         * table nor a match in the policy table that set the IPv4/IPv6 src ip
+         * and nexthop registers to a non-zero value.  (This takes advantage of
+         * the fact that the IPv6 registers are non-zero iff IPv4 registers are
+         * non-zero, i.e., that the IPv4 register bits are a subset of the IPv6
+         * register bits.)
+         */
+        ovn_lflow_add(lflows, od, S_ROUTER_IN_POLICY, 1,
+                      REG_NEXT_HOP_IPV6" == 0 && "
+                      REG_SRC_IPV6" == 0",
+                      "drop;", lflow_ref);
+    }
     /* This is a catch-all rule. It has the lowest priority (0)
      * does a match-all("1") and pass-through (next) */
     ovn_lflow_add(lflows, od, S_ROUTER_IN_POLICY, 0, "1",
