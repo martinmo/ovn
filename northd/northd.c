@@ -1317,6 +1317,12 @@ localnet_can_learn_mac(const struct nbrec_logical_switch_port *nbsp)
 }
 
 static bool
+lr_fallback_to_routing_policy(const struct nbrec_logical_router *nbr)
+{
+    return smap_get_bool(&nbr->options, "fallback_to_routing_policy", false);
+}
+
+static bool
 lsp_is_type_changed(const struct sbrec_port_binding *sb,
                 const struct nbrec_logical_switch_port *nbsp,
                 bool *update_sbrec)
@@ -12607,8 +12613,18 @@ build_static_route_flows_for_lrouter(
     ovs_assert(od->nbr);
     ovn_lflow_add_default_drop(lflows, od, S_ROUTER_IN_IP_ROUTING_ECMP,
                                lflow_ref);
-    ovn_lflow_add_default_drop(lflows, od, S_ROUTER_IN_IP_ROUTING,
-                               lflow_ref);
+    if (lr_fallback_to_routing_policy(od->nbr)) {
+        ovn_lflow_add(lflows, od, S_ROUTER_IN_IP_ROUTING, 0, "1",
+                      "ip.ttl--; flags.loopback = 1; "
+                      REG_ECMP_GROUP_ID" = 0; "
+                      REG_NEXT_HOP_IPV6" = 0; "
+                      REG_SRC_IPV6" = 0; "
+                      "next;",
+                      lflow_ref);
+    } else {
+        ovn_lflow_add_default_drop(lflows, od, S_ROUTER_IN_IP_ROUTING,
+                                   lflow_ref);
+    }
     ovn_lflow_add(lflows, od, S_ROUTER_IN_IP_ROUTING_ECMP, 150,
                   REG_ECMP_GROUP_ID" == 0", "next;",
                   lflow_ref);
@@ -12789,6 +12805,12 @@ build_ingress_policy_flows_for_lrouter(
         struct lflow_ref *lflow_ref)
 {
     ovs_assert(od->nbr);
+    if (lr_fallback_to_routing_policy(od->nbr)) {
+        ovn_lflow_add(lflows, od, S_ROUTER_IN_POLICY, 1,
+                      REG_NEXT_HOP_IPV6" == 0 && "
+                      REG_SRC_IPV6" == 0",
+                      "drop;", lflow_ref);
+    }
     /* This is a catch-all rule. It has the lowest priority (0)
      * does a match-all("1") and pass-through (next) */
     ovn_lflow_add(lflows, od, S_ROUTER_IN_POLICY, 0, "1",
