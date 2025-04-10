@@ -6036,6 +6036,7 @@ main(int argc, char *argv[])
     unsigned int ovs_cond_seqno = UINT_MAX;
     unsigned int ovnsb_cond_seqno = UINT_MAX;
     unsigned int ovnsb_expected_cond_seqno = UINT_MAX;
+    bool has_computed_once = false;
 
     struct controller_engine_ctx ctrl_engine_ctx = {
         .lflow_cache = lflow_cache_create(),
@@ -6122,6 +6123,20 @@ main(int argc, char *argv[])
                 engine_set_force_recompute();
             }
             ovnsb_cond_seqno = new_ovnsb_cond_seqno;
+        }
+
+        /* Check if we have received all initial dumps of the southbound
+         * based on the monitor condtions we set.
+         * If we have sb_monitor_all that means we have all data that we would
+         * ever need.
+         * If we monitor cases individually we need at least one engine run. */
+        if (ovnsb_cond_seqno == ovnsb_expected_cond_seqno &&
+                ovnsb_expected_cond_seqno != UINT_MAX) {
+            if (sb_monitor_all) {
+                daemon_started_recently_ignore();
+            } else if (has_computed_once) {
+                daemon_started_recently_countdown();
+            }
         }
 
         struct engine_context eng_ctx = {
@@ -6281,8 +6296,9 @@ main(int argc, char *argv[])
 
                     stopwatch_stop(CONTROLLER_LOOP_STOPWATCH_NAME,
                                    time_msec());
+
                     if (engine_has_updated()) {
-                        daemon_started_recently_countdown();
+                        has_computed_once = true;
                     }
 
                     ct_zones_data = engine_get_data(&en_ct_zones);
@@ -6400,6 +6416,15 @@ main(int argc, char *argv[])
                                     &runtime_data->lbinding_data.bindings,
                                     &runtime_data->local_datapaths,
                                     sb_monitor_all);
+                        }
+                        /* If there is no new expected seqno we have
+                         * finished loading all needed data from
+                         * southbound. We then need to run one more time since
+                         * we might behave differently. */
+                        if (daemon_started_recently() &&
+                              ovnsb_cond_seqno == ovnsb_expected_cond_seqno) {
+                            daemon_started_recently_ignore();
+                            poll_immediate_wake();
                         }
                         if (ovs_idl_txn) {
                             update_qos(sbrec_port_binding_by_name, ovs_idl_txn,
