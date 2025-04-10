@@ -128,6 +128,8 @@ static unixctl_cb_func debug_ignore_startup_delay;
 #define OFCTRL_SEQNO_RUN_STOPWATCH_NAME "ofctrl-seqno-run"
 #define BFD_RUN_STOPWATCH_NAME "bfd-run"
 #define VIF_PLUG_RUN_STOPWATCH_NAME "vif-plug-run"
+#define SB_IDL_LOOP_RUN_STOPWATCH_NAME "sb-idl-loop-run"
+#define OVS_IDL_LOOP_RUN_STOPWATCH_NAME "ovs-idl-loop-run"
 
 #define OVS_NB_CFG_NAME "ovn-nb-cfg"
 #define OVS_NB_CFG_TS_NAME "ovn-nb-cfg-ts"
@@ -5629,6 +5631,8 @@ main(int argc, char *argv[])
     stopwatch_create(OFCTRL_SEQNO_RUN_STOPWATCH_NAME, SW_MS);
     stopwatch_create(BFD_RUN_STOPWATCH_NAME, SW_MS);
     stopwatch_create(VIF_PLUG_RUN_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(SB_IDL_LOOP_RUN_STOPWATCH_NAME, SW_MS);
+    stopwatch_create(OVS_IDL_LOOP_RUN_STOPWATCH_NAME, SW_MS);
 
     /* Define inc-proc-engine nodes. */
     ENGINE_NODE(sb_ro, "sb_ro");
@@ -6075,7 +6079,13 @@ main(int argc, char *argv[])
 
         engine_init_run();
 
-        struct ovsdb_idl_txn *ovs_idl_txn = ovsdb_idl_loop_run(&ovs_idl_loop);
+
+        stopwatch_start(OVS_IDL_LOOP_RUN_STOPWATCH_NAME, time_msec());
+        struct ovsdb_idl_txn *ovs_idl_txn
+            = ovsdb_idl_loop_run_until(&ovs_idl_loop,
+                                       IDL_LOOP_MAX_DURATION_MS + time_msec());
+        stopwatch_stop(OVS_IDL_LOOP_RUN_STOPWATCH_NAME, time_msec());
+
         unsigned int new_ovs_cond_seqno
             = ovsdb_idl_get_condition_seqno(ovs_idl_loop.idl);
         if (new_ovs_cond_seqno != ovs_cond_seqno) {
@@ -6091,8 +6101,11 @@ main(int argc, char *argv[])
                      &ctrl_engine_ctx, &ovnsb_expected_cond_seqno);
         update_ssl_config(ovsrec_ssl_table_get(ovs_idl_loop.idl));
 
+        stopwatch_start(SB_IDL_LOOP_RUN_STOPWATCH_NAME, time_msec());
         struct ovsdb_idl_txn *ovnsb_idl_txn
-            = ovsdb_idl_loop_run(&ovnsb_idl_loop);
+            = ovsdb_idl_loop_run_until(&ovnsb_idl_loop,
+                                       IDL_LOOP_MAX_DURATION_MS + time_msec());
+        stopwatch_stop(SB_IDL_LOOP_RUN_STOPWATCH_NAME, time_msec());
         unsigned int new_ovnsb_cond_seqno
             = ovsdb_idl_get_condition_seqno(ovnsb_idl_loop.idl);
         if (new_ovnsb_cond_seqno != ovnsb_cond_seqno) {
