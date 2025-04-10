@@ -19,6 +19,8 @@
 
 #include <stdint.h>
 
+#define IDL_LOOP_MAX_DURATION_MS 500
+
 struct ovsrec_bridge_table;
 
 const struct ovsrec_bridge *get_bridge(const struct ovsrec_bridge_table *,
