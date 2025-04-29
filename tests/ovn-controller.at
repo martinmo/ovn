@@ -2604,6 +2604,7 @@ OVS_APP_EXIT_AND_WAIT([ovn-controller])
 # Start ovn-controller, which shouldn't cause any patch interface
 # deletion/recreation
 start_daemon ovn-controller
+check ovn-appctl -t ovn-controller vlog/set file:dbg
 for i in $(seq 20); do
     check ovn-nbctl --wait=hv sync
 done
