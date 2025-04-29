@@ -29,6 +29,7 @@
 #include "chassis.h"
 #include "command-line.h"
 #include "compiler.h"
+#include "coverage.h"
 #include "daemon.h"
 #include "dirs.h"
 #include "openvswitch/dynamic-string.h"
@@ -94,6 +95,8 @@
 #include "route-table-notify.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
+
+COVERAGE_DEFINE(controller_loop_run);
 
 static unixctl_cb_func ct_zone_list;
 static unixctl_cb_func extend_table_list;
@@ -6052,6 +6055,8 @@ main(int argc, char *argv[])
     bool sb_monitor_all = false;
     struct tracked_acl_ids *tracked_acl_ids = NULL;
     while (!exit_args.exiting) {
+        VLOG_DBG("Start of main loop iteration");
+        COVERAGE_INC(controller_loop_run);
         ovsrcu_quiesce_end();
 
         memory_run();
@@ -6106,8 +6111,11 @@ main(int argc, char *argv[])
             = ovsdb_idl_loop_run_until(&ovnsb_idl_loop,
                                        IDL_LOOP_MAX_DURATION_MS + time_msec());
         stopwatch_stop(SB_IDL_LOOP_RUN_STOPWATCH_NAME, time_msec());
+
         unsigned int new_ovnsb_cond_seqno
             = ovsdb_idl_get_condition_seqno(ovnsb_idl_loop.idl);
+        VLOG_DBG("new_ovnsb_cond_seqno = %d, ovnsb_cond_seqno = %d",
+                 new_ovnsb_cond_seqno, ovnsb_cond_seqno);
         if (new_ovnsb_cond_seqno != ovnsb_cond_seqno) {
             if (!new_ovnsb_cond_seqno) {
                 VLOG_INFO("OVNSB IDL reconnected, force recompute.");

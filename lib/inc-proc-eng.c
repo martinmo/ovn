@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "coverage.h"
 #include "lib/util.h"
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/hmap.h"
@@ -33,6 +34,8 @@
 #include "vec.h"
 
 VLOG_DEFINE_THIS_MODULE(inc_proc_eng);
+
+COVERAGE_DEFINE(engine_run);
 
 static bool engine_force_recompute = false;
 static bool engine_run_canceled = false;
@@ -515,12 +518,16 @@ engine_run_node(struct engine_node *node, bool recompute_allowed)
 void
 engine_run(bool recompute_allowed)
 {
+    VLOG_DBG("engine_run(recompute_allowed = %s)", recompute_allowed ? "true" : "false");
     /* If the last run was canceled skip the incremental run because a
      * recompute is needed first.
      */
     if (!recompute_allowed && engine_run_canceled) {
+        VLOG_DBG("skipping engine_run() because last run was canceled");
         return;
     }
+
+    COVERAGE_INC(engine_run);
 
     engine_run_canceled = false;
     struct engine_node *node;
