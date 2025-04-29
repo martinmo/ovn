@@ -955,6 +955,7 @@ daemon_startup_ts(void)
 void
 daemon_started_recently_countdown(void)
 {
+    VLOG_DBG("daemon_started_recently_countdown(): startup_delay = %d", startup_delay);
     if (startup_delay > 0) {
         startup_delay--;
     }
