@@ -420,6 +420,9 @@ m4_define([OVN_CLEANUP_SBOX],[
 # Gracefully terminate all OVN daemons, including those in the
 # specified sandbox instances.
 m4_define([OVN_CLEANUP],[
+    echo
+    echo "delaying cleanup by 500ms"
+    sleep 0.5
     m4_foreach([sbox_and_error], [$@], [
         sbox=$(echo "sbox_and_error" |sed -n '1p')
         error=$(echo "sbox_and_error"  | grep '/')
