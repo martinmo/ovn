@@ -1563,7 +1563,6 @@ for az in `seq 1 $n_az`; do
             ofport-request=$p
     done
 
-    check ovn-appctl -t ovn-controller vlog/set file:dbg
     sim_add gw$az
     as gw$az
     check ovs-vsctl add-br br-phys
