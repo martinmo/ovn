@@ -2598,13 +2598,6 @@ check ovn-nbctl --wait=hv sync
 # Patch port might be created by ovn-controller after handling nb_cfg sync, if ovs db is busy handling command.
 OVS_WAIT_UNTIL([test 1 = $(ovs-vsctl list-ports br-int | grep patch-br-int-to-lsp-ext | wc -l)])
 
-# ovn-appctl -t ovn-controller coverage/read-counter controller_loop_run
-# ovn-appctl -t ovn-controller coverage/read-counter engine_run
-# ovn-appctl -t ovn-controller coverage/read-counter ovsdb_cs_run_blocked
-# ovn-appctl -t ovn-controller coverage/read-counter ovsdb_cs_run_deadline
-# ovn-appctl -t ovn-controller stopwatch/show ovs-idl-loop-run
-# ovn-appctl -t ovn-controller stopwatch/show sb-idl-loop-run
-
 # Stop ovn-controller
 OVS_APP_EXIT_AND_WAIT([ovn-controller])
 
@@ -2615,21 +2608,6 @@ check ovn-appctl -t ovn-controller vlog/set file:dbg
 for i in $(seq 20); do
     check ovn-nbctl --wait=hv sync
 done
-
-# ovn-appctl -t ovn-controller coverage/read-counter controller_loop_run
-# ovn-appctl -t ovn-controller coverage/read-counter engine_run
-# ovn-appctl -t ovn-controller coverage/read-counter ovsdb_cs_run_blocked
-# ovn-appctl -t ovn-controller coverage/read-counter ovsdb_cs_run_deadline
-# ovn-appctl -t ovn-controller stopwatch/show ovs-idl-loop-run
-# ovn-appctl -t ovn-controller stopwatch/show sb-idl-loop-run
-
-# For reasons I do not yet understand, one arbitrary unixctl command is
-# sufficient to fix this test when run with the Timing API IDL functions and
-# large timeouts.
-# It postpones the debug/dump-related-ports command that appears in the
-# OVN_CLEANUP macro below to a later controller iteration, which somehow
-# leads to related ports being returned again (instead of returning "").
-ovn-appctl -t ovn-controller debug/status
 
 AT_CHECK([grep "deleted interface patch" hv1/ovs-vswitchd.log], [1], [ignore])
 OVN_CLEANUP([hv1])
