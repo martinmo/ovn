@@ -6566,7 +6566,9 @@ main(int argc, char *argv[])
             route_table_notify_wait();
         }
 
-        unixctl_server_run(unixctl);
+        if (has_computed_once) {
+            unixctl_server_run(unixctl);
+        }
 
         unixctl_server_wait(unixctl);
         if (exit_args.exiting || pending_pkt.conn) {
